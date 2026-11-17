@@ -1,0 +1,22 @@
+[package]
+name = "tickstream"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Real-time market-data feed over WebSockets: Tokio broadcast fan-out, bounded per-client queues, slow-consumer disconnection"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
