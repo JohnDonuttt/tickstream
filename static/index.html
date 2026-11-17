@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tickstream</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #dfe3ea;
+    --text: #141a24;
+    --muted: #5d6676;
+    --accent: #2459d6;
+    --accent-fill: rgba(36, 89, 214, 0.10);
+    --grid: #e9ecf1;
+    --up: #13804b;
+    --down: #c23030;
+    --warn: #a15c00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --panel: #161a21;
+      --border: #272d38;
+      --text: #e6e9ef;
+      --muted: #9099a8;
+      --accent: #6c9bff;
+      --accent-fill: rgba(108, 155, 255, 0.12);
+      --grid: #212631;
+      --up: #3ccf86;
+      --down: #ff6b6b;
+      --warn: #f0b04a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  header .spacer { flex: 1; }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status[data-state="live"] .dot { background: var(--up); }
+  .status[data-state="connecting"] .dot,
+  .status[data-state="waiting"] .dot { background: var(--warn); }
+  .status[data-state="closed"] .dot { background: var(--down); }
+  button {
+    font: inherit;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: 0;
+  }
+  aside {
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    overflow: auto;
+  }
+  .sym {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 4px 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .sym[aria-selected="true"] { background: var(--accent-fill); }
+  .sym .name { font-weight: 600; }
+  .sym .price { font-variant-numeric: tabular-nums; text-align: right; }
+  .sym .chg { grid-column: 2 / 4; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .sym .chg.up { color: var(--up); }
+  .sym .chg.down { color: var(--down); }
+  .sym input { margin: 0; }
+  .chart-wrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .chart-head { display: flex; align-items: baseline; gap: 12px; padding: 14px 16px 0; }
+  .chart-head h2 { margin: 0; font-size: 18px; }
+  .chart-head .big { font-size: 22px; font-variant-numeric: tabular-nums; }
+  #chart { flex: 1; width: 100%; min-height: 240px; display: block; }
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .hint { color: var(--muted); padding: 10px 14px; font-size: 12px; }
+  @media (max-width: 700px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--border); max-height: 40vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>tickstream</h1>
+  <span class="spacer"></span>
+  <span class="status" id="status" data-state="connecting" role="status" aria-live="polite">
+    <span class="dot"></span><span id="status-text">Connecting</span>
+  </span>
+  <button id="reconnect" type="button">Reconnect now</button>
+</header>
+<main>
+  <aside>
+    <div id="symbols"></div>
+    <p class="hint">Tick a box to subscribe to a symbol. Click a row to chart it.</p>
+  </aside>
+  <section class="chart-wrap">
+    <div class="chart-head">
+      <h2 id="chart-title">Waiting for data</h2>
+      <span class="big" id="chart-price"></span>
+    </div>
+    <canvas id="chart" aria-label="Price chart"></canvas>
+  </section>
+</main>
+<footer>
+  <span id="rate">0 msg/s</span>
+  <span id="received">0 received</span>
+  <span id="attempts">0 reconnects</span>
+  <span id="last-close"></span>
+</footer>
+
+<script>
+"use strict";
+
+
+const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+const MAX_POINTS = 600; // per symbol
+const BACKOFF_BASE_MS = 500;
+const BACKOFF_MAX_MS = 15000;
+
+
+const series = new Map(); // symbol -> { points: [{t, p} or null at a gap], first, last }
+const subscribed = new Set();
+let focused = null; // charted symbol
+let ws = null;
+let attempt = 0; // failed attempts since the last hello
+let reconnects = 0;
+let retryTimer = null;
+let countdownTimer = null;
+let received = 0;
+let windowCount = 0;
+let dirty = true;
+let knownSymbols = [];
+let userTouchedSubscriptions = false;
+
+const $ = (id) => document.getElementById(id);
+
+
+function setStatus(state, text) {
+  $("status").dataset.state = state;
+  $("status-text").textContent = text;
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  clearInterval(countdownTimer);
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+  }
+  setStatus("connecting", attempt ? `Connecting (attempt ${attempt + 1})` : "Connecting");
+  const socket = new WebSocket(WS_URL);
+  ws = socket;
+
+  socket.onmessage = (ev) => {
+    if (socket !== ws) return;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    switch (msg.type) {
+      case "hello": onHello(msg.symbols); break;
+      case "tick": onTick(msg); break;
+      case "subscribed": break;
+      case "error": console.warn("server:", msg.message); break;
+    }
+  };
+
+  socket.onclose = (ev) => {
+    if (socket !== ws) return;
+    ws = null;
+    const reason = ev.reason ? `${ev.reason} (${ev.code})` : `code ${ev.code}`;
+    $("last-close").textContent = `Last disconnect: ${reason}`;
+    // break the line so the chart doesn't join across the outage
+    for (const s of series.values()) {
+      if (s.points.length && s.points[s.points.length - 1] !== null) s.points.push(null);
+    }
+    dirty = true;
+    scheduleReconnect();
+  };
+}
+
+// Exponential backoff with full jitter, so a server restart doesn't get every
+// client reconnecting in the same instant.
+function scheduleReconnect() {
+  const ceiling = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** attempt);
+  const delay = Math.max(100, Math.round(Math.random() * ceiling));
+  attempt += 1;
+  const due = Date.now() + delay;
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((due - Date.now()) / 1000));
+    setStatus("waiting", `Disconnected, retrying in ${left}s`);
+  };
+  tick();
+  countdownTimer = setInterval(tick, 250);
+  retryTimer = setTimeout(() => { countReconnect(); connect(); }, delay);
+}
+
+function countReconnect() {
+  reconnects += 1;
+  $("attempts").textContent = `${reconnects} reconnect${reconnects === 1 ? "" : "s"}`;
+}
+
+function onHello(symbols) {
+  attempt = 0;
+  setStatus("live", "Live");
+  knownSymbols = symbols;
+  if (!userTouchedSubscriptions) {
+    symbols.forEach((s) => subscribed.add(s));
+  }
+  for (const s of symbols) {
+    if (!series.has(s)) series.set(s, { points: [], first: null, last: null });
+  }
+  if (!focused || !symbols.includes(focused)) focused = symbols[0] || null;
+  renderSymbols();
+  sendSubscription();
+}
+
+function sendSubscription() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "subscribe", symbols: [...subscribed] }));
+}
+
+function onTick(t) {
+  received += 1;
+  windowCount += 1;
+  let s = series.get(t.symbol);
+  if (!s) {
+    s = { points: [], first: null, last: null };
+    series.set(t.symbol, s);
+  }
+  if (s.first === null) s.first = t.price;
+  s.last = t.price;
+  s.points.push({ t: t.ts, p: t.price });
+  if (s.points.length > MAX_POINTS) s.points.splice(0, s.points.length - MAX_POINTS);
+  updateRow(t.symbol);
+  if (t.symbol === focused) dirty = true;
+}
+
+
+function fmt(p) {
+  if (p === null || p === undefined) return "";
+  const digits = p >= 1000 ? 2 : p >= 1 ? 3 : 5;
+  return p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: digits });
+}
+
+function renderSymbols() {
+  const box = $("symbols");
+  box.textContent = "";
+  for (const sym of knownSymbols) {
+    const row = document.createElement("div");
+    row.className = "sym";
+    row.dataset.symbol = sym;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(sym === focused));
+    row.tabIndex = 0;
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = subscribed.has(sym);
+    cb.setAttribute("aria-label", `Subscribe to ${sym}`);
+    cb.addEventListener("click", (e) => e.stopPropagation());
+    cb.addEventListener("change", () => {
+      userTouchedSubscriptions = true;
+      if (cb.checked) subscribed.add(sym); else subscribed.delete(sym);
+      sendSubscription();
+    });
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = sym;
+    const price = document.createElement("span");
+    price.className = "price";
+    const chg = document.createElement("span");
+    chg.className = "chg";
+
+    row.append(cb, name, price, chg);
+    const pick = () => { focused = sym; renderSymbols(); dirty = true; };
+    row.addEventListener("click", pick);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    box.append(row);
+    updateRow(sym);
+  }
+}
+
+function updateRow(sym) {
+  const row = document.querySelector(`.sym[data-symbol="${CSS.escape(sym)}"]`);
+  const s = series.get(sym);
+  if (!row || !s) return;
+  row.querySelector(".price").textContent = fmt(s.last);
+  const chg = row.querySelector(".chg");
+  if (s.first !== null && s.last !== null) {
+    const pct = (s.last / s.first - 1) * 100;
+    chg.textContent = `${pct >= 0 ? "+" : ""}${pct.toFixed(3)}% since page load`;
+    chg.className = "chg " + (pct > 0 ? "up" : pct < 0 ? "down" : "");
+  } else {
+    chg.textContent = subscribed.has(sym) ? "Waiting for ticks" : "Not subscribed";
+    chg.className = "chg";
+  }
+}
+
+
+const canvas = $("chart");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const { width, height } = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(width * dpr));
+  canvas.height = Math.max(1, Math.round(height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  dirty = true;
+}
+new ResizeObserver(resize).observe(canvas);
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// 1, 2 or 5 times a power of ten
+function niceStep(range, targetLines) {
+  const raw = range / targetLines;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const norm = raw / mag;
+  return (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+}
+
+function draw() {
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const s = focused && series.get(focused);
+  $("chart-title").textContent = focused || "Waiting for data";
+  $("chart-price").textContent = s ? fmt(s.last) : "";
+
+  const pts = s ? s.points.filter(Boolean) : [];
+  if (pts.length < 2) {
+    ctx.fillStyle = css("--muted");
+    ctx.font = "13px system-ui, sans-serif";
+    ctx.fillText(subscribed.has(focused) ? "Collecting ticks" : "Subscribe to see this symbol", 16, 28);
+    return;
+  }
+
+  const pad = { l: 12, r: 80, t: 16, b: 28 };
+  const tMax = pts[pts.length - 1].t;
+  const tMin = Math.min(pts[0].t, tMax - 1000);
+  let pMin = Infinity, pMax = -Infinity;
+  for (const pt of pts) { if (pt.p < pMin) pMin = pt.p; if (pt.p > pMax) pMax = pt.p; }
+  if (pMax - pMin < 1e-9) { pMax += Math.abs(pMax) * 1e-4 || 1; pMin -= Math.abs(pMin) * 1e-4 || 1; }
+  const margin = (pMax - pMin) * 0.08;
+  pMin -= margin; pMax += margin;
+
+  const x = (t) => pad.l + ((t - tMin) / (tMax - tMin)) * (w - pad.l - pad.r);
+  const y = (p) => pad.t + (1 - (p - pMin) / (pMax - pMin)) * (h - pad.t - pad.b);
+
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.strokeStyle = css("--grid");
+  ctx.fillStyle = css("--muted");
+  ctx.lineWidth = 1;
+  const step = niceStep(pMax - pMin, 5);
+  for (let v = Math.ceil(pMin / step) * step; v <= pMax; v += step) {
+    const yy = Math.round(y(v)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
+    ctx.fillText(fmt(v), w - pad.r + 8, yy);
+  }
+
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "center";
+  const span = (tMax - tMin) / 1000;
+  const tStep = niceStep(span, 5);
+  for (let sec = 0; sec <= span; sec += tStep) {
+    const xx = x(tMax - sec * 1000);
+    ctx.fillText(sec === 0 ? "now" : `-${+sec.toFixed(1)}s`, xx, h - 8);
+  }
+  ctx.textAlign = "start";
+
+  const accent = css("--accent");
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 1.75;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  let pen = false;
+  for (const pt of s.points) {
+    if (!pt || pt.t < tMin) { pen = false; continue; }
+    if (pen) ctx.lineTo(x(pt.t), y(pt.p)); else { ctx.moveTo(x(pt.t), y(pt.p)); pen = true; }
+  }
+  ctx.stroke();
+
+  const last = pts[pts.length - 1];
+  ctx.fillStyle = accent;
+  ctx.beginPath(); ctx.arc(x(last.t), y(last.p), 3.5, 0, Math.PI * 2); ctx.fill();
+}
+
+function frame() {
+  if (dirty) { dirty = false; draw(); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+setInterval(() => {
+  $("rate").textContent = `${windowCount} msg/s`;
+  $("received").textContent = `${received.toLocaleString()} received`;
+  windowCount = 0;
+}, 1000);
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { dirty = true; });
+
+$("reconnect").addEventListener("click", () => { attempt = 0; countReconnect(); connect(); });
+
+connect();
+</script>
+</body>
+</html>
